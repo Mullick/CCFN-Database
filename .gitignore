@@ -1,0 +1,23 @@
+# Environment / secrets — never commit this
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Downloaded / generated data (not source-controlled)
+*.pdf
+photos/
+reports/
