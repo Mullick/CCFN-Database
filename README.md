@@ -1,21 +1,21 @@
-# Carlton County Jail Roster Scraper
+# CCFN Database — Carlton County Jail Roster Tracker
 
-Scrapes the Carlton County, MN jail roster PDF, stores structured inmate records in MySQL, extracts mugshot photos, and serves them via Nginx.
+Scrapes the Carlton County, MN jail roster PDF, stores structured inmate records in MySQL with full change history, extracts mugshot photos, and serves them via Nginx.
 
 ## Features
 
-- Parses all fields from the roster PDF: name, race, age, agencies, booking date, hold type, court date, bail amount, charges
-- Extracts and saves mugshot photos named by roster ID
-- `bonus` field captures any unexpected data found in a record
-- Duplicate-safe: re-scraping the same PDF won't create duplicate records
-- Accepts a **live URL** or a **local historical PDF file** as input
-- Nginx serves photos and reports over HTTP
+- **Per-booking records** — each incarceration is a separate row; returning inmates get a new entry
+- **Change tracking** — every field change on an active record is logged to `inmate_history` with the roster print date as the source timestamp
+- **Currently incarcerated flag** — automatically set/cleared based on roster presence with a 24-hour grace period for clerical errors
+- **Roster print date** — extracted from the PDF header ("Printed on April 25, 2026") and stored on every record and history row
+- **Duplicate-safe** — re-scraping the same PDF is idempotent
+- **Flexible input** — accepts a live URL or a local historical PDF file
 
 ## Quick Start
 
 1. Follow `docs/SETUP.md` for full server setup (MySQL, Python, Nginx)
 2. Copy `.env.example` to `.env` and set your database password
-3. Initialize the database schema:
+3. Initialize the schema:
    ```bash
    source venv/bin/activate
    python scripts/db_init.py
@@ -32,61 +32,88 @@ Scrapes the Carlton County, MN jail roster PDF, stores structured inmate records
 ## Project Structure
 
 ```
-jailroster/
+CCFN-Database/
 ├── scripts/
-│   ├── scraper.py          # Main PDF scraper
-│   ├── db_init.py          # Database schema setup
+│   ├── scraper.py          # Main PDF scraper + DB logic
+│   ├── db_init.py          # Schema creation
 │   └── run.sh              # Cron-friendly wrapper
 ├── config/
 │   └── nginx-jailroster.conf
 ├── docs/
-│   └── SETUP.md            # Full server setup guide
-├── .env.example            # Environment variable template
+│   └── SETUP.md
+├── .env.example
 ├── .gitignore
 ├── requirements.txt
 └── README.md
 ```
 
-## Database Schema
+## Database Tables
+
+### `inmates`
+One row per booking. Key columns:
 
 | Column | Description |
 |--------|-------------|
-| `id` | Auto-increment primary key |
-| `roster_id` | ID printed on the PDF roster |
-| `full_name` / `last_name` / `first_name` / `middle_name` | Parsed name fields |
-| `race` | Race as listed in the PDF |
-| `age` | Age at time of booking |
-| `arresting_agency` | Agency that made the arrest |
-| `holding_agency` | Agency currently holding the inmate |
-| `book_datetime` | Booking date and time |
-| `out_date` | Release date (if listed) |
-| `hold_type` | e.g. BENCH WARRANT, PROBABLE CAUSE |
-| `next_court_date` | Next scheduled court appearance |
+| `id` | Auto-increment PK |
+| `roster_id` | ID from the PDF |
+| `full_name` / `last_name` / `first_name` / `middle_name` | Parsed name |
+| `race`, `age` | Demographics |
+| `arresting_agency`, `holding_agency` | Agency info |
+| `book_datetime` | Booking date/time |
+| `out_date` | Release date if listed |
+| `hold_type` | BENCH WARRANT, PROBABLE CAUSE, etc. |
+| `next_court_date` | Next court appearance |
 | `bail_amount` | Bail in dollars |
 | `charges` | JSON array of charge strings |
-| `photo_filename` | Filename of saved mugshot |
-| `bonus` | Any unexpected/extra data found in the record |
-| `source_file` | URL or filename the record was scraped from |
-| `scraped_at` | Timestamp of when the record was inserted |
-| `record_hash` | SHA-256 deduplication key |
+| `photo_filename` | Saved mugshot filename |
+| `bonus` | Extra/unexpected data |
+| `currently_incarcerated` | 1 = active, 0 = released |
+| `last_seen_date` | Most recent roster date they appeared on |
+| `release_confirmed_at` | When absence was first detected |
+| `roster_print_date` | Date from PDF "Printed on ..." header |
+| `source_file` | URL or filename scraped from |
+| `booking_key` | SHA-256 dedup key (roster_id + name + book_datetime) |
 
-## Automated Scraping
+### `inmate_history`
+One row per field change on an active booking:
 
-Add to crontab to run every 6 hours:
+| Column | Description |
+|--------|-------------|
+| `inmate_id` | FK → inmates.id |
+| `field_name` | Which column changed |
+| `old_value` | Previous value |
+| `new_value` | New value |
+| `roster_print_date` | Source roster date for this change |
+| `changed_at` | Timestamp of detection |
+
+## Useful Queries
+
+```sql
+-- All currently incarcerated inmates
+SELECT roster_id, full_name, hold_type, book_datetime
+FROM inmates WHERE currently_incarcerated = 1
+ORDER BY book_datetime DESC;
+
+-- Full change history for one inmate
+SELECT h.changed_at, h.field_name, h.old_value, h.new_value, h.roster_print_date
+FROM inmate_history h
+JOIN inmates i ON h.inmate_id = i.id
+WHERE i.roster_id = '01008519'
+ORDER BY h.changed_at;
+
+-- All bookings for a person (multiple incarcerations)
+SELECT id, book_datetime, out_date, hold_type, currently_incarcerated
+FROM inmates WHERE full_name = 'Doe, Jane'
+ORDER BY book_datetime;
+```
+
+## Automation
+
 ```
 0 */6 * * * cd /opt/jailroster && ./scripts/run.sh >> /var/log/jailroster.log 2>&1
 ```
 
 ## Web Access
 
-After Nginx setup, photos and reports are available at:
 - `http://YOUR_SERVER_IP/photos/`
 - `http://YOUR_SERVER_IP/reports/`
-
-## Requirements
-
-- Ubuntu 24.04
-- Python 3.12+
-- MySQL 8.0+
-- Nginx
-- `poppler-utils` system package (for pdf2image)

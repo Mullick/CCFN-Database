@@ -1,12 +1,9 @@
-# Environment / secrets — never commit this
+# Secrets — never commit
 .env
 
 # Python
 __pycache__/
 *.py[cod]
-*.egg-info/
-dist/
-build/
 venv/
 .venv/
 
@@ -14,10 +11,8 @@ venv/
 .DS_Store
 Thumbs.db
 
-# Logs
+# Generated data
 *.log
-
-# Downloaded / generated data (not source-controlled)
 *.pdf
 photos/
 reports/
