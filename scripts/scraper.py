@@ -347,6 +347,129 @@ def _parse_date_bail(text: str, record: dict, dates_seen: list):
 # Image Extraction
 # ─────────────────────────────────────────────
 
+def _try_decode_image(raw: bytes, img_ref: dict) -> Image.Image | None:
+    """
+    Try multiple strategies to decode raw PDF image bytes into a PIL Image.
+    PDF images can be JPEG, PNG, JBIG2, CCITT Group 4, or indexed color —
+    the raw stream bytes are not always a self-contained file.
+    """
+    import io
+
+    # Strategy 1: raw bytes are already a valid image file (most common — JPEG)
+    try:
+        return Image.open(io.BytesIO(raw)).convert("RGB")
+    except Exception:
+        pass
+
+    # Strategy 2: write to temp file and let Pillow sniff the format
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp.write(raw)
+            tmp_path = tmp.name
+        img = Image.open(tmp_path).convert("RGB")
+        os.unlink(tmp_path)
+        return img
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+    # Strategy 3: CCITT Group 3/4 fax encoding — common in older PDFs
+    # Reconstruct a valid TIFF wrapper so Pillow can decode it
+    try:
+        width  = int(img_ref.get("width",  img_ref.get("Width",  0)))
+        height = int(img_ref.get("height", img_ref.get("Height", 0)))
+        if width and height:
+            import struct
+            # Minimal TIFF header for CCITT Group 4
+            def _tiff_header(w, h, data_len):
+                # Little-endian TIFF with CCITT T6 (Group 4) compression
+                ifd = [
+                    (256, 3, 1, w),           # ImageWidth
+                    (257, 3, 1, h),           # ImageLength
+                    (258, 3, 1, 1),           # BitsPerSample = 1
+                    (259, 3, 1, 4),           # Compression = CCITT Group 4
+                    (262, 3, 1, 0),           # PhotometricInterpretation = WhiteIsZero
+                    (278, 3, 1, h),           # RowsPerStrip
+                    (279, 4, 1, data_len),    # StripByteCounts
+                    (284, 3, 1, 1),           # PlanarConfiguration
+                ]
+                offset = 8 + 2 + len(ifd) * 12 + 4
+                ifd.insert(6, (273, 4, 1, offset))  # StripOffsets
+                ifd.sort(key=lambda x: x[0])
+                hdr  = b"II" + struct.pack("<HI", 42, 8)
+                hdr += struct.pack("<H", len(ifd))
+                for tag, typ, cnt, val in ifd:
+                    hdr += struct.pack("<HHII", tag, typ, cnt, val)
+                hdr += struct.pack("<I", 0)
+                return hdr
+
+            import io
+            hdr  = _tiff_header(width, height, len(raw))
+            tiff = io.BytesIO(hdr + raw)
+            return Image.open(tiff).convert("RGB")
+    except Exception:
+        pass
+
+    # Strategy 4: treat as raw bitmap (last resort)
+    try:
+        width  = int(img_ref.get("width",  img_ref.get("Width",  0)))
+        height = int(img_ref.get("height", img_ref.get("Height", 0)))
+        mode   = img_ref.get("colorspace", "RGB")
+        if isinstance(mode, list):
+            mode = "RGB"
+        if width and height:
+            return Image.frombytes("RGB", (width, height), raw).convert("RGB")
+    except Exception:
+        pass
+
+    return None
+
+
+def _render_page_crop(pdf_path: str, page_num: int, img_ref: dict) -> Image.Image | None:
+    """
+    Render the specific page at high DPI and crop just the mugshot region
+    defined by the image reference bounding box. Used as a last resort when
+    all byte-decode strategies fail.
+    """
+    try:
+        pages = convert_from_path(
+            pdf_path, dpi=200,
+            first_page=page_num + 1,
+            last_page=page_num + 1,
+        )
+        if not pages:
+            return None
+        page_img = pages[0]
+        pw, ph = page_img.size
+
+        # img_ref coordinates are in PDF points (72 per inch), page size also in points
+        # We need to scale to the rendered pixel dimensions
+        with pdfplumber.open(pdf_path) as pdf:
+            page = pdf.pages[page_num]
+            pdf_w = float(page.width)
+            pdf_h = float(page.height)
+
+        scale_x = pw / pdf_w
+        scale_y = ph / pdf_h
+
+        x0 = int(float(img_ref.get("x0", 0))   * scale_x)
+        y0 = int(float(img_ref.get("top", 0))   * scale_y)
+        x1 = int(float(img_ref.get("x1", pw))   * scale_x)
+        y1 = int(float(img_ref.get("bottom", ph)) * scale_y)
+
+        # Clamp to page bounds
+        x0, x1 = max(0, x0), min(pw, x1)
+        y0, y1 = max(0, y0), min(ph, y1)
+
+        if x1 > x0 and y1 > y0:
+            return page_img.crop((x0, y0, x1, y1)).convert("RGB")
+    except Exception as e:
+        print(f"    ⚠  Page render crop failed: {e}")
+    return None
+
+
 def extract_mugshots(pdf_path: str, records: list) -> list:
     PHOTO_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -357,27 +480,38 @@ def extract_mugshots(pdf_path: str, records: list) -> list:
             images_by_page.extend((page_num, img) for img in sorted_imgs)
 
     if not images_by_page:
-        print("  ⚠  No embedded images found — using page-render fallback.")
+        print("  ⚠  No embedded images found — using full page-render fallback.")
         _extract_mugshots_render_fallback(pdf_path, records)
         return records
 
     for idx, record in enumerate(records):
         if idx >= len(images_by_page):
             break
-        _, img_ref = images_by_page[idx]
+        page_num, img_ref = images_by_page[idx]
+        roster_id = record.get("roster_id", f"unk_{idx}")
+
+        img = None
+
+        # Try decoding the raw stream bytes first
         try:
             raw = img_ref.get("stream").get_data()
-            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-                tmp.write(raw)
-                tmp_path = tmp.name
-            img = Image.open(tmp_path).convert("RGB")
-            filename = f"{record['roster_id']}.jpg"
-            img.save(PHOTO_DIR / filename, "JPEG", quality=90)
-            record["photo_filename"] = filename
-            os.unlink(tmp_path)
-            print(f"  📷  Saved photo: {filename}")
+            img = _try_decode_image(raw, img_ref)
         except Exception as e:
-            print(f"  ⚠  Photo error for {record['roster_id']}: {e}")
+            print(f"    ⚠  Stream read failed for {roster_id}: {e}")
+
+        # If byte decoding failed, render the page and crop
+        if img is None:
+            print(f"    ℹ  Byte decode failed for {roster_id} — trying page render crop ...")
+            img = _render_page_crop(pdf_path, page_num, img_ref)
+
+        if img is None:
+            print(f"  ⚠  Could not extract photo for {roster_id} — skipping.")
+            continue
+
+        filename = f"{roster_id}.jpg"
+        img.save(PHOTO_DIR / filename, "JPEG", quality=90)
+        record["photo_filename"] = filename
+        print(f"  📷  Saved photo: {filename}")
 
     return records
 
