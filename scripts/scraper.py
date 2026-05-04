@@ -41,7 +41,8 @@ load_dotenv()
 # Config
 # ─────────────────────────────────────────────
 PHOTO_DIR   = Path(os.getenv("PHOTO_DIR",   "/var/www/jailroster/photos"))
-REPORTS_DIR = Path(os.getenv("REPORTS_DIR", "/var/www/jailroster/reports"))
+REPORTS_DIR     = Path(os.getenv("REPORTS_DIR",     "/var/www/jailroster/reports"))
+PDF_ARCHIVE_DIR = Path(os.getenv("PDF_ARCHIVE_DIR", "/home/mullick/roster_archive"))
 
 DB_CFG = dict(
     host     = os.getenv("DB_HOST", "localhost"),
@@ -115,14 +116,36 @@ HEADER_RE     = re.compile(r"Page \d+ of \d+\s+Carlton Jail Website.*?\n", re.IG
 COL_HEADER_RE = re.compile(r"Mugshot\s+Demographics\s+Arresting Agency\s+Charges.*", re.IGNORECASE)
 ROSTER_ID_RE  = re.compile(r"^\s*(\d{5,9})\s*$", re.MULTILINE)
 NAME_RE       = re.compile(r"^([A-Z][A-Z\-']+),\s+([A-Z][A-Z\s\-']+)$")
-RACE_RE       = re.compile(
-    r"^(American Indian or Alaska Native|White|Black or African American|"
-    r"Asian|Hispanic|Pacific Islander|Unknown|Other.*)$", re.IGNORECASE
+
+# Race: search anywhere in the line, not just at start
+# Ordered longest-first so "American Indian or Alaska Native" matches before "American"
+RACE_VALUES = [
+    "American Indian or Alaska Native",
+    "Black or African American",
+    "Pacific Islander",
+    "Hispanic",
+    "Unknown",
+    "Asian",
+    "White",
+    "Other",
+]
+RACE_RE = re.compile(
+    r"(" + "|".join(re.escape(r) for r in RACE_VALUES) + r")",
+    re.IGNORECASE
 )
+
+# Age: standalone 1-3 digit number, but NOT a year (>= 120 is a year / statute fragment)
+AGE_RE = re.compile(r"^\d{1,3}$")
+
 BOOKDT_RE     = re.compile(r"\b(\d{2}/\d{2}/\d{2,4}\s+\d{2}:\d{2})\b")
 COURT_DATE_RE = re.compile(r"\b(\d{2}/\d{2}/\d{2,4}(?:\s+\d{2}:\d{2})?)\b")
 BAIL_RE       = re.compile(r"\$[\d,]+\.?\d*")
-CHARGE_RE     = re.compile(r"^\d+[A-Z]?\.\d+[\.\d\w\(\)]*\s*-\s*.+")
+
+# Charge statute: handles formats like 609.2242, 609.2242.1(2), 152.025.2(1), 171.24.2
+# Also handles lines that are JUST a statute code (description may be on next line)
+STATUTE_RE    = re.compile(r"^\d{2,3}[A-Z]?\.\d+[\d\.A-Z\(\)]*", re.IGNORECASE)
+CHARGE_RE     = re.compile(r"^\d{2,3}[A-Z]?\.\d+[\d\.A-Z\(\)]*\s*-\s*.+", re.IGNORECASE)
+
 PRINT_DATE_RE = re.compile(r"Printed on\s+(\w+ \d{1,2},\s*\d{4})", re.IGNORECASE)
 
 HOLD_TYPES = [
@@ -182,15 +205,18 @@ def parse_block(block: str) -> dict | None:
     while i < len(lines):
         line = lines[i].strip()
 
+        # Skip bare label lines
         if re.match(r"^(NAME:|RACE:|AGE:|HELD FOR:)\s*$", line):
             i += 1
             continue
 
+        # Roster ID — standalone number before name is found
         if not record["roster_id"] and re.match(r"^\d{5,9}$", line):
             record["roster_id"] = line
             i += 1
             continue
 
+        # Name — "LAST, FIRST [MIDDLE]" in all caps
         if not record["full_name"]:
             m = NAME_RE.match(line)
             if m:
@@ -204,16 +230,29 @@ def parse_block(block: str) -> dict | None:
                 i += 1
                 continue
 
-        if not record["race"] and RACE_RE.match(line):
-            record["race"] = line.strip()
-            i += 1
-            continue
+        # Race — search anywhere in line (PDF sometimes puts race inline with other text)
+        if not record["race"]:
+            rm = RACE_RE.search(line)
+            if rm:
+                record["race"] = rm.group(1).strip()
+                # If the line also has an age-sized number after race, grab it
+                remainder = RACE_RE.sub("", line).strip()
+                if not record["age"] and re.match(r"^\d{1,3}$", remainder):
+                    age_val = int(remainder)
+                    if age_val < 120:
+                        record["age"] = age_val
+                i += 1
+                continue
 
-        if not record["age"] and re.match(r"^\d{1,3}$", line):
-            record["age"] = int(line)
-            i += 1
-            continue
+        # Age — standalone integer under 120 (avoids swallowing statute fragments)
+        if not record["age"] and AGE_RE.match(line):
+            age_val = int(line)
+            if age_val < 120:
+                record["age"] = age_val
+                i += 1
+                continue
 
+        # Booking datetime
         bm = BOOKDT_RE.search(line)
         if bm and not record["book_datetime"]:
             record["book_datetime"] = parse_date(bm.group(1))
@@ -223,11 +262,37 @@ def parse_block(block: str) -> dict | None:
             i += 1
             continue
 
+        # Charge line: statute with description on same line e.g. "609.2242.1(2) - Domestic Assault..."
         if CHARGE_RE.match(line):
             charges.append(line.strip())
             i += 1
             continue
 
+        # Statute-only line: description is on the next line
+        # e.g. line = "609.2242.1(2)", next line = "Domestic Assault-Misdemeanor..."
+        if STATUTE_RE.match(line):
+            statute = line.strip()
+            # Peek at next line — if it doesn't look like a new field, treat as description
+            if i + 1 < len(lines):
+                next_line = lines[i + 1].strip()
+                # Next line is description if it's not a statute, date, name, label, or number
+                is_description = (
+                    next_line
+                    and not STATUTE_RE.match(next_line)
+                    and not BOOKDT_RE.search(next_line)
+                    and not re.match(r"^(NAME:|RACE:|AGE:|HELD FOR:)\s*$", next_line)
+                    and not re.match(r"^\d{5,9}$", next_line)
+                    and not NAME_RE.match(next_line)
+                )
+                if is_description:
+                    charges.append(f"{statute} - {next_line}")
+                    i += 2
+                    continue
+            charges.append(statute)
+            i += 1
+            continue
+
+        # Hold type
         matched_hold = None
         for ht in HOLD_TYPES:
             if ht in line.upper():
@@ -240,17 +305,20 @@ def parse_block(block: str) -> dict | None:
             i += 1
             continue
 
+        # Bail amount
         bm2 = BAIL_RE.search(line)
         if bm2 and not record["bail_amount"]:
             record["bail_amount"] = parse_money(bm2.group(0))
             i += 1
             continue
 
+        # Anything else that isn't purely numeric/date goes into agencies bucket
         if line and not re.match(r"^[\d/: ]+$", line):
             agencies.append(line)
 
         i += 1
 
+    # First unique agency = arresting, second = holding
     seen_ag = list(dict.fromkeys(agencies))
     record["arresting_agency"] = seen_ag[0] if len(seen_ag) >= 1 else None
     record["holding_agency"]   = seen_ag[1] if len(seen_ag) >= 2 else seen_ag[0] if seen_ag else None
@@ -338,6 +406,39 @@ def _extract_mugshots_render_fallback(pdf_path: str, records: list):
             records[record_idx]["photo_filename"] = filename
             print(f"  📷  Saved cropped photo: {filename}")
             record_idx += 1
+
+
+# ─────────────────────────────────────────────
+# PDF Archiving
+# ─────────────────────────────────────────────
+
+def archive_pdf(pdf_path: str, roster_print_date, reason: str = ""):
+    """
+    Copy the source PDF to PDF_ARCHIVE_DIR with a timestamped filename.
+    Called only when changes are detected (or on first-ever run).
+
+    Filename format: CCJ_Roster_<print_date>_scraped_<timestamp>[_<reason>].pdf
+    Example:         CCJ_Roster_2026-04-30_scraped_2026-04-30_18-45-00_new_records.pdf
+    """
+    try:
+        PDF_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+
+        print_str   = roster_print_date.strftime("%Y-%m-%d") if roster_print_date else "unknown"
+        scrape_str  = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
+        reason_slug = f"_{reason.replace(' ', '_')}" if reason else ""
+        filename    = f"CCJ_Roster_{print_str}_scraped_{scrape_str}{reason_slug}.pdf"
+        dest        = PDF_ARCHIVE_DIR / filename
+
+        import shutil
+        shutil.copy2(pdf_path, dest)
+        # Ensure mullick owns the file (safe to call even if already correct)
+        os.chmod(dest, 0o644)
+        print(f"  📁  Archived PDF → {dest}")
+        return str(dest)
+
+    except Exception as e:
+        print(f"  ⚠  Could not archive PDF: {e}")
+        return None
 
 
 # ─────────────────────────────────────────────
@@ -557,6 +658,14 @@ def save_records(records: list, source_file: str, roster_print_date):
     print(f"  ✅  Inserted: {inserted}  |  Updated: {updated} ({total_changes} field changes)"
           f"  |  Unchanged: {skipped}  |  Newly absent: {flagged}  |  Released: {released}")
 
+    return {
+        "inserted": inserted,
+        "updated":  updated,
+        "released": released,
+        "flagged":  flagged,
+        "changes":  total_changes,
+    }
+
 
 # ─────────────────────────────────────────────
 # Main
@@ -604,7 +713,26 @@ def run(source: str, is_url: bool):
         records = extract_mugshots(pdf_path, records)
 
         print(f"\n💾  Saving {len(records)} records ...")
-        save_records(records, source, roster_print_date)
+        stats = save_records(records, source, roster_print_date)
+
+        # Archive the PDF if anything changed or this is the first run
+        something_changed = (
+            stats["inserted"] > 0
+            or stats["updated"] > 0
+            or stats["released"] > 0
+        )
+        if something_changed:
+            parts = []
+            if stats["inserted"] > 0:
+                parts.append(f"{stats['inserted']}_new")
+            if stats["updated"] > 0:
+                parts.append(f"{stats['updated']}_updated")
+            if stats["released"] > 0:
+                parts.append(f"{stats['released']}_released")
+            reason = "_".join(parts)
+            archive_pdf(pdf_path, roster_print_date, reason)
+        else:
+            print("  ℹ  No changes detected — PDF not archived.")
 
         print(f"\n✅  Done. Processed {len(records)} inmates from {source}.")
 
