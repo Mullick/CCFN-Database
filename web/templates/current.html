@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Currently Incarcerated — Carlton County{% endblock %}
+
+{% block content %}
+<div class="page-title">Currently Incarcerated</div>
+<div class="page-sub">{{ inmates|length }} inmate{{ 's' if inmates|length != 1 else '' }} in custody</div>
+
+{% if not inmates %}
+<div class="empty">
+    <span class="empty-icon">🔒</span>
+    <div>No inmates currently in custody.</div>
+</div>
+{% else %}
+{% for inmate in inmates %}
+{% set photos = inmate.all_photos.split(',') if inmate.all_photos else [] %}
+<div class="inmate-row">
+
+    <!-- Photo strip -->
+    <div class="photo-strip">
+        {% if photos %}
+            {% for photo in photos[:4] %}
+            <img src="/photos/{{ photo }}" alt="Booking photo" title="{{ inmate.full_name }}">
+            {% endfor %}
+        {% else %}
+            <div class="photo-placeholder">👤</div>
+        {% endif %}
+    </div>
+
+    <!-- Info -->
+    <div>
+        <a href="/inmate/{{ inmate.full_name | urlencode }}" class="inmate-name-link">
+            {{ inmate.full_name }}
+        </a>
+        <div class="inmate-meta">
+            {% if inmate.age %}<span>Age {{ inmate.age }}</span> &nbsp;·&nbsp; {% endif %}
+            {% if inmate.race %}<span>{{ inmate.race }}</span> &nbsp;·&nbsp; {% endif %}
+            {% if inmate.hold_type %}<span>{{ inmate.hold_type }}</span>{% endif %}
+            {% if inmate.book_datetime %}
+            &nbsp;·&nbsp; Booked <span>{{ inmate.book_datetime.strftime('%b %d, %Y') if inmate.book_datetime else '—' }}</span>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Record count + bail -->
+    <div style="text-align:right;">
+        <div class="record-count-badge" style="margin-bottom:0.4rem;">
+            {{ inmate.record_count }} booking{{ 's' if inmate.record_count != 1 else '' }}
+        </div>
+        {% if inmate.bail_amount is not none %}
+        <div class="mono" style="font-size:0.78rem; color: var(--accent);">
+            ${{ '{:,.2f}'.format(inmate.bail_amount) }}
+        </div>
+        {% endif %}
+    </div>
+
+</div>
+{% endfor %}
+{% endif %}
+{% endblock %}

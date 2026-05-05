@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Carlton County Jail Roster{% endblock %}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg:        #0d0d0f;
+            --surface:   #141417;
+            --border:    #2a2a2f;
+            --accent:    #c8a84b;
+            --accent2:   #7c6030;
+            --danger:    #c84b4b;
+            --text:      #e8e6e0;
+            --muted:     #6b6866;
+            --card:      #18181c;
+        }
+
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'IBM Plex Sans', sans-serif;
+            font-size: 14px;
+            line-height: 1.6;
+            min-height: 100vh;
+        }
+
+        /* ── Header ── */
+        header {
+            border-bottom: 1px solid var(--border);
+            padding: 0 2rem;
+            display: flex;
+            align-items: center;
+            gap: 3rem;
+            height: 56px;
+            position: sticky;
+            top: 0;
+            background: var(--bg);
+            z-index: 100;
+        }
+
+        .logo {
+            font-family: 'Bebas Neue', sans-serif;
+            font-size: 1.4rem;
+            letter-spacing: 0.1em;
+            color: var(--accent);
+            text-decoration: none;
+            white-space: nowrap;
+        }
+
+        nav { display: flex; gap: 0; }
+
+        nav a {
+            color: var(--muted);
+            text-decoration: none;
+            font-size: 0.78rem;
+            font-weight: 500;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            padding: 0 1.2rem;
+            height: 56px;
+            display: flex;
+            align-items: center;
+            border-bottom: 2px solid transparent;
+            transition: color 0.15s, border-color 0.15s;
+        }
+
+        nav a:hover { color: var(--text); }
+        nav a.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+        /* ── Main layout ── */
+        main { max-width: 1200px; margin: 0 auto; padding: 2.5rem 2rem; }
+
+        /* ── Page title ── */
+        .page-title {
+            font-family: 'Bebas Neue', sans-serif;
+            font-size: 2.8rem;
+            letter-spacing: 0.05em;
+            color: var(--text);
+            margin-bottom: 0.25rem;
+        }
+
+        .page-sub {
+            color: var(--muted);
+            font-size: 0.82rem;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            margin-bottom: 2rem;
+        }
+
+        /* ── Cards ── */
+        .card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 1.5rem;
+            margin-bottom: 1rem;
+        }
+
+        /* ── Badges ── */
+        .badge {
+            display: inline-block;
+            padding: 0.15rem 0.5rem;
+            border-radius: 2px;
+            font-size: 0.7rem;
+            font-weight: 600;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            font-family: 'IBM Plex Mono', monospace;
+        }
+
+        .badge-active  { background: rgba(200,168,75,0.15); color: var(--accent); border: 1px solid var(--accent2); }
+        .badge-release { background: rgba(107,104,102,0.15); color: var(--muted); border: 1px solid var(--border); }
+        .badge-danger  { background: rgba(200,75,75,0.15); color: var(--danger); border: 1px solid #7c3030; }
+
+        /* ── Mono text ── */
+        .mono { font-family: 'IBM Plex Mono', monospace; }
+
+        /* ── Divider ── */
+        .divider { border: none; border-top: 1px solid var(--border); margin: 1.5rem 0; }
+
+        /* ── Empty state ── */
+        .empty {
+            text-align: center;
+            padding: 4rem 2rem;
+            color: var(--muted);
+        }
+
+        .empty-icon {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            display: block;
+        }
+
+        /* ── Mugshot ── */
+        .mugshot {
+            width: 80px;
+            height: 100px;
+            object-fit: cover;
+            border: 1px solid var(--border);
+            border-radius: 2px;
+            background: var(--surface);
+            display: block;
+        }
+
+        .mugshot-placeholder {
+            width: 80px;
+            height: 100px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 2px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--muted);
+            font-size: 1.5rem;
+        }
+
+        .mugshot-lg {
+            width: 140px;
+            height: 175px;
+            object-fit: cover;
+            border: 1px solid var(--border);
+            border-radius: 3px;
+        }
+
+        .mugshots-row {
+            display: flex;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+            margin-bottom: 1.5rem;
+        }
+
+        /* ── Fields grid ── */
+        .fields {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 1rem;
+        }
+
+        .field-label {
+            font-size: 0.68rem;
+            font-weight: 600;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: var(--muted);
+            margin-bottom: 0.2rem;
+        }
+
+        .field-value {
+            font-size: 0.88rem;
+            color: var(--text);
+        }
+
+        .field-value.mono { font-size: 0.82rem; }
+
+        /* ── Charges list ── */
+        .charges-list {
+            list-style: none;
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+            margin-top: 0.5rem;
+        }
+
+        .charge-item {
+            font-size: 0.82rem;
+            font-family: 'IBM Plex Mono', monospace;
+            color: #b8b6b0;
+            padding: 0.4rem 0.75rem;
+            background: rgba(255,255,255,0.02);
+            border-left: 2px solid var(--accent2);
+            border-radius: 0 2px 2px 0;
+            line-height: 1.4;
+        }
+
+        /* ── Search form ── */
+        .search-bar {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .search-input {
+            flex: 1;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            color: var(--text);
+            font-family: 'IBM Plex Sans', sans-serif;
+            font-size: 0.9rem;
+            padding: 0.6rem 1rem;
+            outline: none;
+            transition: border-color 0.15s;
+        }
+
+        .search-input:focus { border-color: var(--accent); }
+        .search-input::placeholder { color: var(--muted); }
+
+        .btn {
+            background: var(--accent);
+            color: #0d0d0f;
+            border: none;
+            border-radius: 3px;
+            font-family: 'IBM Plex Sans', sans-serif;
+            font-size: 0.8rem;
+            font-weight: 600;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            padding: 0.6rem 1.4rem;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: background 0.15s;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+        }
+
+        .btn:hover { background: #d4b456; }
+        .btn-ghost {
+            background: transparent;
+            color: var(--muted);
+            border: 1px solid var(--border);
+        }
+        .btn-ghost:hover { color: var(--text); background: var(--surface); }
+
+        /* ── Tabs ── */
+        .tabs {
+            display: flex;
+            gap: 0;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 2rem;
+        }
+
+        .tab {
+            padding: 0.75rem 1.5rem;
+            font-size: 0.8rem;
+            font-weight: 500;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            color: var(--muted);
+            text-decoration: none;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -1px;
+            cursor: pointer;
+            transition: color 0.15s;
+        }
+
+        .tab:hover { color: var(--text); }
+        .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+        /* ── Result count ── */
+        .result-count {
+            font-size: 0.78rem;
+            color: var(--muted);
+            margin-bottom: 1.5rem;
+            font-family: 'IBM Plex Mono', monospace;
+        }
+
+        .result-count span { color: var(--accent); }
+
+        /* ── Inmate row (current page) ── */
+        .inmate-row {
+            display: grid;
+            grid-template-columns: auto 1fr auto;
+            gap: 1.5rem;
+            align-items: center;
+            padding: 1rem 1.25rem;
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            margin-bottom: 0.5rem;
+            transition: border-color 0.15s;
+        }
+
+        .inmate-row:hover { border-color: var(--accent2); }
+
+        .inmate-name-link {
+            color: var(--text);
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 0.95rem;
+            display: block;
+            margin-bottom: 0.2rem;
+            transition: color 0.15s;
+        }
+
+        .inmate-name-link:hover { color: var(--accent); }
+
+        .inmate-meta {
+            font-size: 0.78rem;
+            color: var(--muted);
+            font-family: 'IBM Plex Mono', monospace;
+        }
+
+        .inmate-meta span { color: #8a8886; }
+
+        .photo-strip {
+            display: flex;
+            gap: 0.4rem;
+        }
+
+        .photo-strip img {
+            width: 44px;
+            height: 55px;
+            object-fit: cover;
+            border: 1px solid var(--border);
+            border-radius: 2px;
+        }
+
+        .photo-strip .photo-placeholder {
+            width: 44px;
+            height: 55px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 2px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--muted);
+            font-size: 0.9rem;
+        }
+
+        .record-count-badge {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 2px;
+            padding: 0.2rem 0.6rem;
+            font-size: 0.7rem;
+            font-family: 'IBM Plex Mono', monospace;
+            color: var(--muted);
+            white-space: nowrap;
+        }
+
+        /* ── Arrest record card ── */
+        .arrest-card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-bottom: 1.25rem;
+        }
+
+        .arrest-card-header {
+            padding: 0.75rem 1.25rem;
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .arrest-card-body {
+            padding: 1.25rem;
+        }
+
+        .arrest-card-body .fields {
+            margin-bottom: 1rem;
+        }
+
+        /* ── History table ── */
+        .history-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.8rem;
+        }
+
+        .history-table th {
+            text-align: left;
+            padding: 0.5rem 0.75rem;
+            font-size: 0.68rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--muted);
+            border-bottom: 1px solid var(--border);
+            font-weight: 600;
+        }
+
+        .history-table td {
+            padding: 0.5rem 0.75rem;
+            border-bottom: 1px solid rgba(42,42,47,0.5);
+            color: #a0a09a;
+            font-family: 'IBM Plex Mono', monospace;
+            vertical-align: top;
+        }
+
+        .history-table tr:last-child td { border-bottom: none; }
+
+        /* ── Scrollbar ── */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: var(--bg); }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <header>
+        <a href="/" class="logo">Carlton Co. Jail Roster</a>
+        <nav>
+            <a href="/current" class="{% if request.path == '/current' %}active{% endif %}">Currently Incarcerated</a>
+            <a href="/query" class="{% if request.path == '/query' %}active{% endif %}">Query</a>
+        </nav>
+    </header>
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>

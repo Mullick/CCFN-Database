@@ -1,0 +1,165 @@
+{% extends "base.html" %}
+{% block title %}Query — Carlton County Jail Roster{% endblock %}
+
+{% block content %}
+<div class="page-title">Query Records</div>
+<div class="page-sub">Search by name, crime, or booking date</div>
+
+<!-- Search tabs -->
+<div class="tabs">
+    <a class="tab {% if mode == 'name' or not mode %}active{% endif %}"
+       href="/query?mode=name">Inmate Name</a>
+    <a class="tab {% if mode == 'crime' %}active{% endif %}"
+       href="/query?mode=crime">Crime / Charge</a>
+    <a class="tab {% if mode == 'date' %}active{% endif %}"
+       href="/query?mode=date">Booking Date</a>
+</div>
+
+<!-- Search bar -->
+<form method="get" action="/query" class="search-bar">
+    <input type="hidden" name="mode" value="{{ mode or 'name' }}">
+    {% if mode == 'date' %}
+    <input type="date" name="q" value="{{ search }}" class="search-input" style="max-width:220px;">
+    {% else %}
+    <input type="text" name="q" value="{{ search }}"
+           class="search-input"
+           placeholder="{% if mode == 'crime' %}Enter keyword or charge description...{% else %}Enter name...{% endif %}">
+    {% endif %}
+    <button type="submit" class="btn">Search</button>
+    {% if search %}
+    <a href="/query?mode={{ mode }}" class="btn btn-ghost">Clear</a>
+    {% endif %}
+</form>
+
+<!-- Results -->
+{% if search and not results %}
+<div class="empty">
+    <span class="empty-icon">🔍</span>
+    <div>No records found for <strong>{{ search }}</strong>.</div>
+</div>
+
+{% elif results %}
+<div class="result-count">
+    <span>{{ results|length }}</span> record{{ 's' if results|length != 1 else '' }} found
+    {% if mode == 'name' %}— showing all bookings for matching names{% endif %}
+</div>
+
+<!-- Name mode: show mugshots at top grouped by unique name -->
+{% if mode == 'name' %}
+{% set seen_names = [] %}
+{% set photos_shown = [] %}
+{% for r in results %}
+    {% if r.photo_filename and r.photo_filename not in photos_shown %}
+        {% if photos_shown.append(r.photo_filename) %}{% endif %}
+    {% endif %}
+{% endfor %}
+
+{% if photos_shown %}
+<div class="card" style="margin-bottom:2rem;">
+    <div class="field-label" style="margin-bottom:1rem;">Booking Photos</div>
+    <div class="mugshots-row">
+        {% for photo in photos_shown %}
+        <div>
+            <img src="/photos/{{ photo }}" class="mugshot-lg" alt="Booking photo">
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+{% endif %}
+
+<!-- Result cards -->
+{% for r in results %}
+<div class="arrest-card">
+    <div class="arrest-card-header">
+        <div>
+            <a href="/inmate/{{ r.full_name | urlencode }}"
+               style="color:var(--text); text-decoration:none; font-weight:600; font-size:0.95rem;">
+                {{ r.full_name }}
+            </a>
+            <span style="color:var(--muted); font-size:0.78rem; margin-left:1rem; font-family:'IBM Plex Mono',monospace;">
+                #{{ r.roster_id }}
+            </span>
+        </div>
+        <div style="display:flex; gap:0.5rem; align-items:center;">
+            {% if r.currently_incarcerated %}
+            <span class="badge badge-active">In Custody</span>
+            {% else %}
+            <span class="badge badge-release">Released</span>
+            {% endif %}
+            {% if r.hold_type %}
+            <span class="badge badge-danger">{{ r.hold_type }}</span>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="arrest-card-body">
+        <div style="display:flex; gap:1.5rem;">
+
+            {% if r.photo_filename %}
+            <div style="flex-shrink:0;">
+                <img src="/photos/{{ r.photo_filename }}" class="mugshot" alt="Booking photo">
+            </div>
+            {% endif %}
+
+            <div style="flex:1;">
+                <div class="fields">
+                    <div>
+                        <div class="field-label">Race</div>
+                        <div class="field-value">{{ r.race or '—' }}</div>
+                    </div>
+                    <div>
+                        <div class="field-label">Age</div>
+                        <div class="field-value">{{ r.age or '—' }}</div>
+                    </div>
+                    <div>
+                        <div class="field-label">Booked</div>
+                        <div class="field-value mono">
+                            {{ r.book_datetime.strftime('%b %d, %Y %H:%M') if r.book_datetime else '—' }}
+                        </div>
+                    </div>
+                    <div>
+                        <div class="field-label">Arresting Agency</div>
+                        <div class="field-value">{{ r.arresting_agency or '—' }}</div>
+                    </div>
+                    <div>
+                        <div class="field-label">Holding Agency</div>
+                        <div class="field-value">{{ r.holding_agency or '—' }}</div>
+                    </div>
+                    <div>
+                        <div class="field-label">Next Court Date</div>
+                        <div class="field-value mono">
+                            {{ r.next_court_date.strftime('%b %d, %Y') if r.next_court_date else '—' }}
+                        </div>
+                    </div>
+                    <div>
+                        <div class="field-label">Bail (10%)</div>
+                        <div class="field-value mono">
+                            {% if r.bail_amount is not none %}
+                                ${{ '{:,.2f}'.format(r.bail_amount) }}
+                            {% else %}—{% endif %}
+                        </div>
+                    </div>
+                    <div>
+                        <div class="field-label">Out Date</div>
+                        <div class="field-value mono">{{ r.out_date or '—' }}</div>
+                    </div>
+                </div>
+
+                {% set charges = parse_charges(r.charges) %}
+                {% if charges %}
+                <div class="field-label" style="margin-top:0.75rem;">Charges</div>
+                <ul class="charges-list">
+                    {% for charge in charges %}
+                    <li class="charge-item">{{ charge }}</li>
+                    {% endfor %}
+                </ul>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endfor %}
+{% endif %}
+
+{% endblock %}

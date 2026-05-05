@@ -111,14 +111,35 @@ def coerce_str(val) -> str:
 # PDF Text Parsing
 # ─────────────────────────────────────────────
 
+# ─────────────────────────────────────────────
+# PDF Text Parsing — Regexes
+# ─────────────────────────────────────────────
+
 FOOTER_RE     = re.compile(r"\*\*\*Money can be deposited.*?JailATM\.com\*\*\*", re.IGNORECASE)
 HEADER_RE     = re.compile(r"Page \d+ of \d+\s+Carlton Jail Website.*?\n", re.IGNORECASE)
 COL_HEADER_RE = re.compile(r"Mugshot\s+Demographics\s+Arresting Agency\s+Charges.*", re.IGNORECASE)
-ROSTER_ID_RE  = re.compile(r"^\s*(\d{5,9})\s*$", re.MULTILINE)
-NAME_RE       = re.compile(r"^([A-Z][A-Z\-']+),\s+([A-Z][A-Z\s\-']+)$")
+PRINT_DATE_RE = re.compile(r"Printed on\s+(\w+ \d{1,2},\s*\d{4})", re.IGNORECASE)
 
-# Race: search anywhere in the line, not just at start
-# Ordered longest-first so "American Indian or Alaska Native" matches before "American"
+# Name: "LAST, FIRST MIDDLE" all caps
+NAME_RE = re.compile(r"^([A-Z][A-Z\-']+),\s+([A-Z][A-Z\s\-'\.]+)$")
+
+# Age: "A G E : 21" — spaced letters, any amount of whitespace
+AGE_RE = re.compile(r"A\s+G\s+E\s*:\s*(\d{1,3})", re.IGNORECASE)
+
+# Datetime with time: "04/28/26 13:30"
+DATETIME_RE = re.compile(r"\b(\d{2}/\d{2}/\d{2,4}\s+\d{2}:\d{2})\b")
+
+# Date only (court date / out date): "08/18/26"
+DATE_ONLY_RE = re.compile(r"\b(\d{2}/\d{2}/\d{2,4})\b")
+
+# Bail: "$2,500.00" or "$0.00"
+BAIL_RE = re.compile(r"\$[\d,]+\.?\d*")
+
+# Statute: "152.025.2(a)(1)" — starts a charge line
+# Matches at the start of the token, handles letters/parens/dots
+STATUTE_RE = re.compile(r"\b\d{2,3}[A-Z]?\.\d+[\d\.A-Za-z\(\)]*\s*-\s*", re.IGNORECASE)
+
+# Race values — longest first to prevent partial matches
 RACE_VALUES = [
     "American Indian or Alaska Native",
     "Black or African American",
@@ -134,29 +155,26 @@ RACE_RE = re.compile(
     re.IGNORECASE
 )
 
-# Age: standalone 1-3 digit number, but NOT a year (>= 120 is a year / statute fragment)
-AGE_RE = re.compile(r"^\d{1,3}$")
-
-BOOKDT_RE     = re.compile(r"\b(\d{2}/\d{2}/\d{2,4}\s+\d{2}:\d{2})\b")
-COURT_DATE_RE = re.compile(r"\b(\d{2}/\d{2}/\d{2,4}(?:\s+\d{2}:\d{2})?)\b")
-BAIL_RE       = re.compile(r"\$[\d,]+\.?\d*")
-
-# Charge statute: handles formats like 609.2242, 609.2242.1(2), 152.025.2(1), 171.24.2
-# Also handles lines that are JUST a statute code (description may be on next line)
-STATUTE_RE    = re.compile(r"^\d{2,3}[A-Z]?\.\d+[\d\.A-Z\(\)]*", re.IGNORECASE)
-CHARGE_RE     = re.compile(r"^\d{2,3}[A-Z]?\.\d+[\d\.A-Z\(\)]*\s*-\s*.+", re.IGNORECASE)
-
-PRINT_DATE_RE = re.compile(r"Printed on\s+(\w+ \d{1,2},\s*\d{4})", re.IGNORECASE)
-
 HOLD_TYPES = [
-    "BENCH WARRANT", "PROBABLE CAUSE", "SUPERVISION VIOLATION",
-    "UNDER SENTENCE", "HOLD FOR ANOTHER AGENCY", "SENTENCED",
-    "AWAITING TRIAL", "PRETRIAL",
+    "BENCH WARRANT",
+    "PROBABLE CAUSE",
+    "SUPERVISION VIOLATION",
+    "UNDER SENTENCE",
+    "HOLD FOR ANOTHER AGENCY",
+    "SENTENCED",
+    "AWAITING TRIAL",
+    "PRETRIAL",
 ]
 
+# Labels to always skip
+LABEL_RE = re.compile(r"^(NAME:|RACE:|AGE:|HELD FOR:)\s*$", re.IGNORECASE)
 
-def extract_roster_print_date(full_text: str) -> date | None:
-    """Parse 'Printed on April 25, 2026' from the PDF text."""
+
+# ─────────────────────────────────────────────
+# PDF Text Helpers
+# ─────────────────────────────────────────────
+
+def extract_roster_print_date(full_text: str):
     m = PRINT_DATE_RE.search(full_text)
     if not m:
         return None
@@ -183,8 +201,60 @@ def split_into_blocks(full_text: str) -> list:
     return [b.strip() for b in blocks if b.strip()]
 
 
+def parse_date(s: str):
+    s = s.strip()
+    for fmt in ("%m/%d/%y %H:%M", "%m/%d/%Y %H:%M", "%m/%d/%y", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def parse_money(s: str):
+    s = re.sub(r"[^\d.]", "", s)
+    try:
+        return float(s) if s else None
+    except ValueError:
+        return None
+
+
+# ─────────────────────────────────────────────
+# Block Parser
+# ─────────────────────────────────────────────
+
 def parse_block(block: str) -> dict | None:
-    lines = [l.rstrip() for l in block.splitlines() if l.strip()]
+    """
+    Parse one inmate block.
+
+    Confirmed PDF structure (from diagnostic):
+        ROSTER_ID
+        A G E : NN
+        AGENCY  HOLD_TYPE  COURT_DATE  [OUT_DATE]  [$BAIL]   <- one line
+        RACE:                                                  <- label, skip
+        DATE TIME  STATUTE - charge description               <- booking date prefix on charge
+        [charge continuation lines]
+        RACE_VALUE  (may be split across lines)
+        HELD FOR:   (may be inline with race)
+        HOLDING AGENCY
+        NAME:
+        LAST, FIRST MIDDLE
+    """
+
+    # ── Clean noise lines ─────────────────────────────────────────────────────
+    raw_lines = []
+    for line in block.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if re.match(r"^(Carlton Jail Website|Page \d+ of \d+|Mugshot|Demographics)", line, re.IGNORECASE):
+            continue
+        raw_lines.append(line)
+
+    if not raw_lines:
+        return None
+
+    blob = " ".join(raw_lines)
 
     record = {
         "roster_id": None, "full_name": None,
@@ -197,150 +267,159 @@ def parse_block(block: str) -> dict | None:
         "bonus": None,
     }
 
-    charges  = []
-    agencies = []
-    dates_seen = []
-
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-
-        # Skip bare label lines
-        if re.match(r"^(NAME:|RACE:|AGE:|HELD FOR:)\s*$", line):
-            i += 1
-            continue
-
-        # Roster ID — standalone number before name is found
-        if not record["roster_id"] and re.match(r"^\d{5,9}$", line):
+    # ── 1. ROSTER ID ──────────────────────────────────────────────────────────
+    for line in raw_lines:
+        if re.match(r"^\d{5,9}$", line):
             record["roster_id"] = line
-            i += 1
-            continue
+            break
 
-        # Name — "LAST, FIRST [MIDDLE]" in all caps
-        if not record["full_name"]:
-            m = NAME_RE.match(line)
-            if m:
-                record["last_name"]   = m.group(1).strip().title()
-                rest = m.group(2).strip().split()
-                record["first_name"]  = rest[0].title() if rest else ""
-                record["middle_name"] = " ".join(rest[1:]).title() if len(rest) > 1 else None
-                record["full_name"]   = f"{record['last_name']}, {record['first_name']}"
-                if record["middle_name"]:
-                    record["full_name"] += f" {record['middle_name']}"
-                i += 1
-                continue
-
-        # Race — search anywhere in line (PDF sometimes puts race inline with other text)
-        if not record["race"]:
-            rm = RACE_RE.search(line)
-            if rm:
-                record["race"] = rm.group(1).strip()
-                # If the line also has an age-sized number after race, grab it
-                remainder = RACE_RE.sub("", line).strip()
-                if not record["age"] and re.match(r"^\d{1,3}$", remainder):
-                    age_val = int(remainder)
-                    if age_val < 120:
-                        record["age"] = age_val
-                i += 1
-                continue
-
-        # Age — standalone integer under 120 (avoids swallowing statute fragments)
-        if not record["age"] and AGE_RE.match(line):
-            age_val = int(line)
-            if age_val < 120:
-                record["age"] = age_val
-                i += 1
-                continue
-
-        # Booking datetime
-        bm = BOOKDT_RE.search(line)
-        if bm and not record["book_datetime"]:
-            record["book_datetime"] = parse_date(bm.group(1))
-            remainder = BOOKDT_RE.sub("", line).strip()
-            if remainder:
-                agencies.append(remainder)
-            i += 1
-            continue
-
-        # Charge line: statute with description on same line e.g. "609.2242.1(2) - Domestic Assault..."
-        if CHARGE_RE.match(line):
-            charges.append(line.strip())
-            i += 1
-            continue
-
-        # Statute-only line: description is on the next line
-        # e.g. line = "609.2242.1(2)", next line = "Domestic Assault-Misdemeanor..."
-        if STATUTE_RE.match(line):
-            statute = line.strip()
-            # Peek at next line — if it doesn't look like a new field, treat as description
-            if i + 1 < len(lines):
-                next_line = lines[i + 1].strip()
-                # Next line is description if it's not a statute, date, name, label, or number
-                is_description = (
-                    next_line
-                    and not STATUTE_RE.match(next_line)
-                    and not BOOKDT_RE.search(next_line)
-                    and not re.match(r"^(NAME:|RACE:|AGE:|HELD FOR:)\s*$", next_line)
-                    and not re.match(r"^\d{5,9}$", next_line)
-                    and not NAME_RE.match(next_line)
-                )
-                if is_description:
-                    charges.append(f"{statute} - {next_line}")
-                    i += 2
-                    continue
-            charges.append(statute)
-            i += 1
-            continue
-
-        # Hold type
-        matched_hold = None
-        for ht in HOLD_TYPES:
-            if ht in line.upper():
-                matched_hold = ht
-                break
-        if matched_hold:
-            record["hold_type"] = matched_hold
-            remainder = line.upper().replace(matched_hold, "").strip()
-            _parse_date_bail(remainder, record, dates_seen)
-            i += 1
-            continue
-
-        # Bail amount
-        bm2 = BAIL_RE.search(line)
-        if bm2 and not record["bail_amount"]:
-            record["bail_amount"] = parse_money(bm2.group(0))
-            i += 1
-            continue
-
-        # Anything else that isn't purely numeric/date goes into agencies bucket
-        if line and not re.match(r"^[\d/: ]+$", line):
-            agencies.append(line)
-
-        i += 1
-
-    # First unique agency = arresting, second = holding
-    seen_ag = list(dict.fromkeys(agencies))
-    record["arresting_agency"] = seen_ag[0] if len(seen_ag) >= 1 else None
-    record["holding_agency"]   = seen_ag[1] if len(seen_ag) >= 2 else seen_ag[0] if seen_ag else None
-    record["charges"] = charges
+    # ── 2. NAME — last LAST, FIRST line in block ──────────────────────────────
+    for line in reversed(raw_lines):
+        m = NAME_RE.match(line)
+        if m:
+            record["last_name"]   = m.group(1).strip().title()
+            rest = m.group(2).strip().split()
+            record["first_name"]  = rest[0].title() if rest else ""
+            record["middle_name"] = " ".join(rest[1:]).title() if len(rest) > 1 else None
+            record["full_name"]   = f"{record['last_name']}, {record['first_name']}"
+            if record["middle_name"]:
+                record["full_name"] += f" {record['middle_name']}"
+            break
 
     if not record["roster_id"] or not record["full_name"]:
         return None
+
+    # ── 3. AGE ────────────────────────────────────────────────────────────────
+    am = AGE_RE.search(blob)
+    if am:
+        record["age"] = int(am.group(1))
+
+    # ── 4. RACE — search blob to catch split lines ────────────────────────────
+    rm = RACE_RE.search(blob)
+    if rm:
+        record["race"] = rm.group(1).strip()
+
+    # ── 5. HOLD TYPE LINE — "AGENCY  HOLD_TYPE  DATES  BAIL" ─────────────────
+    # Agency = text before hold type keyword on that line
+    # Court/out dates and bail = text after hold type keyword
+    for line in raw_lines:
+        matched_ht = None
+        for ht in HOLD_TYPES:
+            if ht in line.upper():
+                matched_ht = ht
+                break
+        if not matched_ht:
+            continue
+
+        record["hold_type"] = matched_ht
+        idx         = line.upper().find(matched_ht)
+        agency_part = line[:idx].strip()
+        after_part  = line[idx + len(matched_ht):].strip()
+
+        if agency_part:
+            record["arresting_agency"] = agency_part
+
+        # Bail
+        bm = BAIL_RE.search(after_part)
+        if bm:
+            record["bail_amount"] = parse_money(bm.group(0))
+            after_part = BAIL_RE.sub("", after_part)
+
+        # Court date / out date
+        date_matches  = DATE_ONLY_RE.findall(after_part)
+        dates_parsed  = [parse_date(d) for d in date_matches if parse_date(d)]
+        if dates_parsed:
+            record["next_court_date"] = dates_parsed[0]
+        if len(dates_parsed) >= 2:
+            record["out_date"] = dates_parsed[1].date()
+        break
+
+    # ── 6. HOLDING AGENCY — first AGENCY? line after HELD FOR: ───────────────
+    held_for_idx = None
+    for i, line in enumerate(raw_lines):
+        if "HELD FOR:" in line.upper():
+            held_for_idx = i
+            break
+
+    if held_for_idx is not None:
+        for line in raw_lines[held_for_idx + 1:]:
+            if LABEL_RE.match(line):
+                continue
+            if NAME_RE.match(line):
+                break
+            if RACE_RE.search(line):
+                continue
+            if AGE_RE.search(line):
+                continue
+            if STATUTE_RE.search(line):
+                continue
+            if DATETIME_RE.match(line):
+                continue
+            if re.match(r"^[\d/:.\s]+$", line):
+                continue
+            record["holding_agency"] = line
+            break
+
+    # ── 7. CHARGES — between RACE: label and HELD FOR: ───────────────────────
+    # Charge lines appear after the RACE: label and before HELD FOR:.
+    # First charge line often has "DATE TIME  STATUTE - desc" prefix.
+    # Continuation lines (wrapped description) follow immediately after.
+    race_label_idx = None
+    for i, line in enumerate(raw_lines):
+        if re.match(r"^RACE:\s*$", line, re.IGNORECASE):
+            race_label_idx = i
+            break
+
+    if race_label_idx is None:
+        # No RACE: label found — use hold type line as upper boundary
+        for i, line in enumerate(raw_lines):
+            if record["hold_type"] and record["hold_type"] in line.upper():
+                race_label_idx = i
+                break
+
+    end_idx = held_for_idx if held_for_idx is not None else len(raw_lines)
+
+    charges = []
+    current_charge = None
+
+    if race_label_idx is not None:
+        for line in raw_lines[race_label_idx + 1: end_idx]:
+            # Skip race value lines
+            if RACE_RE.match(line):
+                continue
+            # Skip pure label lines
+            if LABEL_RE.match(line):
+                continue
+
+            # Strip leading datetime prefix and capture booking date
+            dt_m = re.match(r"^(\d{2}/\d{2}/\d{2,4}\s+\d{2}:\d{2})\s+", line)
+            if dt_m:
+                if not record["book_datetime"]:
+                    record["book_datetime"] = parse_date(dt_m.group(1))
+                line = line[dt_m.end():]
+
+            # Does this line start a new charge?
+            if STATUTE_RE.match(line):
+                if current_charge:
+                    charges.append(current_charge)
+                current_charge = line
+            elif re.match(r"^[A-Z]\d{3,}", line):
+                # Non-standard code like X1140
+                if current_charge:
+                    charges.append(current_charge)
+                current_charge = line
+            elif current_charge is not None:
+                # Continuation of previous charge description
+                current_charge += " " + line
+            elif line:
+                current_charge = line
+
+    if current_charge:
+        charges.append(current_charge)
+
+    record["charges"] = charges
     return record
 
-
-def _parse_date_bail(text: str, record: dict, dates_seen: list):
-    bm = BAIL_RE.search(text)
-    if bm and not record["bail_amount"]:
-        record["bail_amount"] = parse_money(bm.group(0))
-    for m in COURT_DATE_RE.finditer(text):
-        dt = parse_date(m.group(1))
-        if dt and dt not in dates_seen:
-            dates_seen.append(dt)
-            if not record["next_court_date"]:
-                record["next_court_date"] = dt
-            elif not record["out_date"]:
-                record["out_date"] = dt.date()
 
 
 # ─────────────────────────────────────────────

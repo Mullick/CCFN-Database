@@ -1,0 +1,176 @@
+{% extends "base.html" %}
+{% block title %}{{ full_name }} — Carlton County Jail Roster{% endblock %}
+
+{% block content %}
+
+<!-- Back link -->
+<a href="javascript:history.back()" class="btn btn-ghost" style="margin-bottom:1.5rem; font-size:0.75rem;">
+    ← Back
+</a>
+
+<!-- Name header -->
+<div class="page-title">{{ full_name }}</div>
+<div class="page-sub">{{ records|length }} booking record{{ 's' if records|length != 1 else '' }}</div>
+
+<!-- All mugshots at top -->
+{% set all_photos = [] %}
+{% for r in records %}
+    {% if r.photo_filename and r.photo_filename not in all_photos %}
+        {% if all_photos.append(r.photo_filename) %}{% endif %}
+    {% endif %}
+{% endfor %}
+
+{% if all_photos %}
+<div class="card" style="margin-bottom:2rem;">
+    <div class="field-label" style="margin-bottom:1rem;">All Booking Photos</div>
+    <div class="mugshots-row">
+        {% for photo in all_photos %}
+        <div>
+            <img src="/photos/{{ photo }}" class="mugshot-lg" alt="Booking photo">
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+<!-- Arrest records -->
+{% for r in records %}
+<div class="arrest-card">
+    <div class="arrest-card-header">
+        <div>
+            <span class="mono" style="color:var(--muted); font-size:0.78rem;">#{{ r.roster_id }}</span>
+            <span style="margin-left:1rem; color:var(--muted); font-size:0.78rem;">
+                Booking {{ loop.index }} of {{ records|length }}
+            </span>
+        </div>
+        <div style="display:flex; gap:0.5rem; align-items:center;">
+            {% if r.currently_incarcerated %}
+            <span class="badge badge-active">In Custody</span>
+            {% else %}
+            <span class="badge badge-release">Released</span>
+            {% endif %}
+            {% if r.hold_type %}
+            <span class="badge badge-danger">{{ r.hold_type }}</span>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="arrest-card-body">
+        <div style="display:flex; gap:1.5rem;">
+
+            {% if r.photo_filename %}
+            <div style="flex-shrink:0;">
+                <img src="/photos/{{ r.photo_filename }}" class="mugshot-lg" alt="Booking photo">
+            </div>
+            {% endif %}
+
+            <div style="flex:1;">
+                <div class="fields">
+                    <div>
+                        <div class="field-label">Race</div>
+                        <div class="field-value">{{ r.race or '—' }}</div>
+                    </div>
+                    <div>
+                        <div class="field-label">Age at Booking</div>
+                        <div class="field-value">{{ r.age or '—' }}</div>
+                    </div>
+                    <div>
+                        <div class="field-label">Booked</div>
+                        <div class="field-value mono">
+                            {{ r.book_datetime.strftime('%b %d, %Y  %H:%M') if r.book_datetime else '—' }}
+                        </div>
+                    </div>
+                    <div>
+                        <div class="field-label">Last Seen on Roster</div>
+                        <div class="field-value mono">
+                            {{ r.last_seen_date.strftime('%b %d, %Y') if r.last_seen_date else '—' }}
+                        </div>
+                    </div>
+                    <div>
+                        <div class="field-label">Out Date</div>
+                        <div class="field-value mono">{{ r.out_date or '—' }}</div>
+                    </div>
+                    <div>
+                        <div class="field-label">Next Court Date</div>
+                        <div class="field-value mono">
+                            {{ r.next_court_date.strftime('%b %d, %Y') if r.next_court_date else '—' }}
+                        </div>
+                    </div>
+                    <div>
+                        <div class="field-label">Arresting Agency</div>
+                        <div class="field-value">{{ r.arresting_agency or '—' }}</div>
+                    </div>
+                    <div>
+                        <div class="field-label">Holding Agency</div>
+                        <div class="field-value">{{ r.holding_agency or '—' }}</div>
+                    </div>
+                    <div>
+                        <div class="field-label">Bail (10%)</div>
+                        <div class="field-value mono">
+                            {% if r.bail_amount is not none %}
+                                ${{ '{:,.2f}'.format(r.bail_amount) }}
+                            {% else %}—{% endif %}
+                        </div>
+                    </div>
+                    <div>
+                        <div class="field-label">Roster Print Date</div>
+                        <div class="field-value mono">{{ r.roster_print_date or '—' }}</div>
+                    </div>
+                </div>
+
+                {% set charges = parse_charges(r.charges) %}
+                {% if charges %}
+                <div class="field-label" style="margin-top:1rem; margin-bottom:0.5rem;">Charges</div>
+                <ul class="charges-list">
+                    {% for charge in charges %}
+                    <li class="charge-item">{{ charge }}</li>
+                    {% endfor %}
+                </ul>
+                {% endif %}
+
+                {% if r.bonus %}
+                <div class="field-label" style="margin-top:1rem;">Additional Notes</div>
+                <div class="field-value" style="font-size:0.82rem; color:var(--muted); margin-top:0.25rem;">
+                    {{ r.bonus }}
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endfor %}
+
+<!-- Change history -->
+{% if history %}
+<div style="margin-top:2.5rem;">
+    <div class="page-title" style="font-size:1.6rem; margin-bottom:0.25rem;">Change History</div>
+    <div class="page-sub">Field-level audit trail</div>
+
+    <div class="card" style="padding:0; overflow:hidden;">
+        <table class="history-table">
+            <thead>
+                <tr>
+                    <th>Date Detected</th>
+                    <th>Roster Date</th>
+                    <th>Field</th>
+                    <th>Previous Value</th>
+                    <th>New Value</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for h in history %}
+                <tr>
+                    <td>{{ h.changed_at.strftime('%b %d, %Y %H:%M') if h.changed_at else '—' }}</td>
+                    <td>{{ h.roster_print_date or '—' }}</td>
+                    <td style="color:var(--accent);">{{ h.field_name }}</td>
+                    <td style="color:var(--danger);">{{ h.old_value or '—' }}</td>
+                    <td style="color:#7cad7c;">{{ h.new_value or '—' }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endif %}
+
+{% endblock %}
