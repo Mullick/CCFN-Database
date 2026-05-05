@@ -550,47 +550,95 @@ def _render_page_crop(pdf_path: str, page_num: int, img_ref: dict) -> Image.Imag
 
 
 def extract_mugshots(pdf_path: str, records: list) -> list:
+    """
+    Extract mugshots by finding each inmate's roster ID text on the page,
+    then cropping the image region to its left.
+
+    This is position-based — immune to index ordering mismatches between
+    images and text blocks, which caused wrong photos being assigned.
+
+    The Carlton County PDF layout places the mugshot in the leftmost ~18%
+    of the page, vertically aligned with the inmate's record block.
+    """
     PHOTO_DIR.mkdir(parents=True, exist_ok=True)
 
-    images_by_page = []
-    with pdfplumber.open(pdf_path) as pdf:
-        for page_num, page in enumerate(pdf.pages):
-            sorted_imgs = sorted(page.images, key=lambda img: img.get("top", 0))
-            images_by_page.extend((page_num, img) for img in sorted_imgs)
+    # Build a lookup: roster_id → record
+    record_map = {r["roster_id"]: r for r in records if r.get("roster_id")}
 
-    if not images_by_page:
-        print("  ⚠  No embedded images found — using full page-render fallback.")
-        _extract_mugshots_render_fallback(pdf_path, records)
+    # Render all pages at 200 DPI
+    try:
+        pages_rendered = convert_from_path(pdf_path, dpi=200)
+    except Exception as e:
+        print(f"  ✗  Page render failed: {e}")
         return records
 
-    for idx, record in enumerate(records):
-        if idx >= len(images_by_page):
-            break
-        page_num, img_ref = images_by_page[idx]
-        roster_id = record.get("roster_id", f"unk_{idx}")
+    with pdfplumber.open(pdf_path) as pdf:
+        for page_num, page in enumerate(pdf.pages):
+            if page_num >= len(pages_rendered):
+                break
 
-        img = None
+            page_img = pages_rendered[page_num]
+            pw, ph   = page_img.size
+            pdf_w    = float(page.width)
+            pdf_h    = float(page.height)
+            scale_x  = pw / pdf_w
+            scale_y  = ph / pdf_h
 
-        # Try decoding the raw stream bytes first
-        try:
-            raw = img_ref.get("stream").get_data()
-            img = _try_decode_image(raw, img_ref)
-        except Exception as e:
-            print(f"    ⚠  Stream read failed for {roster_id}: {e}")
+            # Find all roster ID text positions on this page
+            # pdfplumber words give us x0, top, x1, bottom in PDF points
+            words = page.extract_words()
 
-        # If byte decoding failed, render the page and crop
-        if img is None:
-            print(f"    ℹ  Byte decode failed for {roster_id} — trying page render crop ...")
-            img = _render_page_crop(pdf_path, page_num, img_ref)
+            # Group words by their vertical position to find roster IDs
+            # A roster ID is a standalone 5-9 digit number
+            roster_positions = []
+            for word in words:
+                text = word["text"].strip()
+                if re.match(r"^\d{5,9}$", text) and text in record_map:
+                    roster_positions.append({
+                        "roster_id": text,
+                        "top":       float(word["top"]),
+                        "bottom":    float(word["bottom"]),
+                    })
 
-        if img is None:
-            print(f"  ⚠  Could not extract photo for {roster_id} — skipping.")
-            continue
+            if not roster_positions:
+                continue
 
-        filename = f"{roster_id}.jpg"
-        img.save(PHOTO_DIR / filename, "JPEG", quality=90)
-        record["photo_filename"] = filename
-        print(f"  📷  Saved photo: {filename}")
+            # Sort by vertical position top to bottom
+            roster_positions.sort(key=lambda x: x["top"])
+
+            # For each roster ID, determine the vertical crop region:
+            # from its top to the next roster ID's top (or page bottom)
+            for i, rp in enumerate(roster_positions):
+                roster_id = rp["roster_id"]
+                y_top_pdf = rp["top"]
+
+                if i + 1 < len(roster_positions):
+                    y_bot_pdf = roster_positions[i + 1]["top"]
+                else:
+                    y_bot_pdf = pdf_h
+
+                # Mugshot is in the left ~18% of the page
+                x0 = 0
+                x1 = int(pw * 0.18)
+                y0 = max(0, int(y_top_pdf * scale_y) - 10)  # small buffer
+                y1 = min(ph, int(y_bot_pdf * scale_y))
+
+                if x1 <= x0 or y1 <= y0:
+                    continue
+
+                crop = page_img.crop((x0, y0, x1, y1)).convert("RGB")
+
+                # Skip if the crop is mostly blank (no photo for this record)
+                import numpy as np
+                arr = np.array(crop)
+                if arr.mean() > 245:  # nearly all white — no photo
+                    print(f"  ℹ  No photo region found for {roster_id}")
+                    continue
+
+                filename = f"{roster_id}.jpg"
+                crop.save(PHOTO_DIR / filename, "JPEG", quality=90)
+                record_map[roster_id]["photo_filename"] = filename
+                print(f"  📷  Saved photo: {filename} (position-based)")
 
     return records
 
