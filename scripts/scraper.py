@@ -357,6 +357,16 @@ def parse_block(block: str) -> dict | None:
                 continue
             if re.match(r"^[\d/:.\s]+$", line):
                 continue
+            # Reject charge continuation lines
+            if re.search(r"- Arrest of (Adult|Juvenile)", line, re.IGNORECASE):
+                continue
+            if re.search(r"\b(paraphernalia|cannabis|fentanyl|methamphetamine|cocaine|heroin)\b", line, re.IGNORECASE):
+                continue
+            if re.match(r"^(Schedule|Violation|Possess|Sale|Degree|Penetration|Conduct|Assault|Bodily|Operate|Influence|Concentration|Revocation|Probation|Vehicle|Property|Build)", line, re.IGNORECASE):
+                continue
+            # Must look like an org name
+            if not re.search(r"[A-Za-z]{3,}", line):
+                continue
             record["holding_agency"] = line
             break
 
